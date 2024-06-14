@@ -9,7 +9,7 @@ use rpc_definition::endpoints::sleep::Sleep;
 use rtic_sync::channel::{Receiver, Sender};
 
 // Backend IP.
-const BACKEND_ENDPOINT: (Ipv4Address, u16) = (Ipv4Address::new(192, 168, 0, 200), 8321);
+const BACKEND_ENDPOINT: (Ipv4Address, u16) = (Ipv4Address::new(192, 168, 0, 220), 8321);
 
 /// Main UDP RX/TX data pump. Also sets up the UDP socket.
 pub async fn run_comms(

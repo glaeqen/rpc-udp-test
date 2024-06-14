@@ -6,10 +6,9 @@ edition = "2021"
 [dependencies]
 postcard = { version = "1.0.8", features = ["experimental-derive"] }
 serde = { version = "1.0.192", features = ["derive"], default-features = false }
-# postcard-rpc = "0.4"
-postcard-rpc = { git = "https://github.com/korken89/postcard-rpc.git", branch = "feature/dispatcher-macro", features = ["defmt-03"] }
+postcard-rpc = { version = "0.5.1", git = "https://github.com/glaeqen/postcard-rpc", branch = "dev" }
 defmt = { version = "0.3", optional = true }
 
 [features]
 backend = ["postcard-rpc/use-std"]
-defmt-03 = ["dep:defmt", "postcard-rpc/defmt-03"]
+defmt-03 = ["dep:defmt", "postcard-rpc/use-defmt"]

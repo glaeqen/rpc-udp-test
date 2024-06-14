@@ -6,7 +6,7 @@
 use log::*;
 use once_cell::sync::{Lazy, OnceCell};
 use rustc_hash::FxHashMap;
-use std::{net::IpAddr, time::Duration};
+use std::net::IpAddr;
 use tokio::{
     net::UdpSocket,
     sync::{
@@ -14,14 +14,10 @@ use tokio::{
         mpsc::{channel, error::TrySendError, Receiver, Sender},
         RwLock,
     },
-    time::timeout,
 };
 
 use rpc_definition::{
-    postcard_rpc::{
-        headered::extract_header_from_bytes,
-        host_client::{HostClient, ProcessError, RpcFrame, WireContext},
-    },
+    postcard_rpc::host_client::HostClient,
     wire_error::{FatalError, ERROR_PATH},
 };
 
@@ -112,7 +108,7 @@ pub(crate) static CONNECTION_SUBSCRIBER: Lazy<broadcast::Sender<Connection>> =
     Lazy::new(|| broadcast::channel(1000).0);
 
 /// This handles incoming packets from a specific IP.
-async fn communication_worker(ip: IpAddr, mut packet_recv: Receiver<Vec<u8>>) {
+async fn communication_worker(ip: IpAddr, packet_recv: Receiver<Vec<u8>>) {
     debug!("{ip}: Registered new connection, starting handshake");
 
     // TODO: This is where we should perform ECDH handshake & authenticity verification of a device.
@@ -145,90 +141,121 @@ async fn communication_worker(ip: IpAddr, mut packet_recv: Receiver<Vec<u8>>) {
 
     debug!("{ip}: Connection active");
 
+    let rx = plumbing::UdpDatagramReceiver::new(packet_recv);
+
+    let tx = plumbing::UdpDatagramSender::new(ip);
+
+    let mut sp = plumbing::Spawner::new();
+
     // We have one host client per connection.
-    let (hostclient, wirecontext) = HostClient::<FatalError>::new_manual(ERROR_PATH, 10);
+    let hostclient = HostClient::<FatalError>::new_with_wire(tx, rx, &mut sp, ERROR_PATH, 10);
+
+    let _ = CONNECTION_SUBSCRIBER.send(Connection::New(ip));
 
     // Store the API client for access by public APIs
     {
         API_CLIENTS.write().await.insert(ip, hostclient);
     }
 
-    let _ = CONNECTION_SUBSCRIBER.send(Connection::New(ip));
+    sp.select_on_all_workers().await;
 
-    // Start handling of all I/O.
-    let WireContext {
-        mut outgoing,
-        incoming,
-        mut new_subs,
-    } = wirecontext;
+    let _ = CONNECTION_SUBSCRIBER.send(Connection::Closed(ip));
 
-    let mut subs = FxHashMap::default();
+    // cleanup of global state
+    API_CLIENTS.write().await.remove(&ip);
 
-    loop {
-        // Adapted from `cobs_wire_worker`.
-        // Wait for EITHER a serialized request, OR some data from the embedded device.
-        tokio::select! {
-            sub = new_subs.recv() => {
-                let Some(new_subscription) = sub else {
-                    break;
-                };
+    debug!("{ip}: Connection dropped");
+}
 
-                subs.insert(new_subscription.key, new_subscription.tx);
-            }
-            out = outgoing.recv() => {
-                // Receiver returns None when all Senders have hung up.
-                let (Some(msg), Some(socket)) = (out, SOCKET.get()) else {
-                    break;
-                };
+mod plumbing {
+    use core::future::Future;
+    use std::{net::IpAddr, time::Duration};
 
-                // Send message via the UDP socket.
-                if let Err(e) = socket.send_to(&msg.to_bytes(), (ip, 8321)).await {
-                    error!("{ip}: Socket send error = {e:?}");
-                    break;
-                }
-            }
-            packet = timeout(Duration::from_secs(5), packet_recv.recv()) => {
-                // Make sure the UDP RX worker is still alive.
-                let Ok(packet) = packet else {
-                    debug!("{ip}: Connection closed.");
-                    let _ = CONNECTION_SUBSCRIBER.send(Connection::Closed(ip));
-                    break;
-                };
+    use rpc_definition::postcard_rpc::host_client::{WireRx, WireSpawn, WireTx};
+    use tokio::{sync::mpsc::Receiver, task::JoinSet, time::timeout};
 
-                let Some(packet) = packet else {
-                    break;
-                };
+    use super::SOCKET;
 
-                trace!("{ip}: Received packet {packet:02x?}");
+    pub struct UdpDatagramReceiver {
+        receiver: Receiver<Vec<u8>>,
+    }
 
-                // Attempt to extract a header so we can get the sequence number.
-                // Since UDP is already full packets, we don't need to use COBS or similar, a
-                // packet is a full message.
-                if let Ok((hdr, body)) = extract_header_from_bytes(&packet) {
-                    // Got a header, turn it into a frame.
-                    let frame = RpcFrame { header: hdr.clone(), body: body.to_vec() };
+    impl UdpDatagramReceiver {
+        pub fn new(receiver: Receiver<Vec<u8>>) -> Self {
+            Self { receiver }
+        }
+    }
 
-                    // Give priority to subscriptions. TBH I only do this because I know a hashmap
-                    // lookup is cheaper than a waitmap search.
-                    if let Some(tx) = subs.get_mut(&hdr.key) {
-                        // Yup, we have a subscription.
-                        if tx.send(frame).await.is_err() {
-                            // But if sending failed, the listener is gone, so drop it.
-                            subs.remove(&hdr.key);
-                        }
-                    } else {
-                        // Wake the given sequence number. If the WaitMap is closed, we're done here
-                        if let Err(ProcessError::Closed) = incoming.process(frame) {
-                            break;
-                        }
+    #[derive(thiserror::Error, Debug)]
+    #[error(transparent)]
+    pub struct Error(#[from] anyhow::Error);
+
+    impl WireRx for UdpDatagramReceiver {
+        type Error = Error;
+
+        fn receive(&mut self) -> impl Future<Output = Result<Vec<u8>, Self::Error>> + Send {
+            async {
+                match timeout(Duration::from_secs(5), self.receiver.recv()).await {
+                    Ok(maybe_data) => Ok(maybe_data.ok_or_else(|| {
+                        log::error!("All senders were closed");
+                        anyhow::anyhow!("All senders were closed")
+                    })?),
+                    Err(Elapsed) => {
+                        log::info!("Connection timed out");
+                        Err(anyhow::anyhow!("Connection timed out").into())
                     }
-                } else {
-                    debug!("{ip}: Malformed packet {packet:x?}");
                 }
             }
         }
     }
 
-    // cleanup of global state
-    API_CLIENTS.write().await.remove(&ip);
+    pub struct UdpDatagramSender {
+        ip: IpAddr,
+    }
+
+    impl UdpDatagramSender {
+        pub fn new(ip: IpAddr) -> Self {
+            Self { ip }
+        }
+    }
+
+    impl WireTx for UdpDatagramSender {
+        type Error = Error;
+
+        fn send(&mut self, data: Vec<u8>) -> impl Future<Output = Result<(), Self::Error>> + Send {
+            async move {
+                let socket = SOCKET.get().ok_or_else(|| {
+                    log::error!("Socket is not initialized");
+                    anyhow::anyhow!("Socket is not initialized")
+                })?;
+                socket
+                    .send_to(&data, (self.ip, 8321))
+                    .await
+                    .map_err(|e| anyhow::Error::from(e))?;
+                Ok(())
+            }
+        }
+    }
+
+    pub struct Spawner {
+        handles: JoinSet<()>,
+    }
+
+    impl Spawner {
+        pub fn new() -> Self {
+            Self {
+                handles: JoinSet::new(),
+            }
+        }
+        pub async fn select_on_all_workers(mut self) {
+            self.handles.join_next().await;
+            self.handles.shutdown().await;
+        }
+    }
+
+    impl WireSpawn for Spawner {
+        fn spawn(&mut self, fut: impl Future<Output = ()> + Send + 'static) {
+            let _ = self.handles.spawn(fut);
+        }
+    }
 }
