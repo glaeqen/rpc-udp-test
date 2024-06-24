@@ -79,3 +79,9 @@ pub async fn run_comms(
 pub async fn handle_stack(cx: app::handle_stack::Context<'_>) -> ! {
     cx.shared.network_stack.run().await
 }
+
+pub mod edtls {
+    use embedded_dtls::{ApplicationDataReceiver, ApplicationDataSender, Endpoint};
+
+    // TODO: Use BBQueue for ADR and ADS
+}

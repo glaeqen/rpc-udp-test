@@ -39,6 +39,9 @@ ascon-hash = { version = "0.2.0", default-features = false }
 rpc-definition = { path = "../rpc-definition", features = ["defmt-03"] }
 postcard = { version = "1.0.8", features = ["defmt"] }
 
+[dependencies.embedded-dtls]
+# path = "/src/embedded-dtls"
+git = "https://github.com/korken89/embedded-dtls"
 
 [features]
 other = []
