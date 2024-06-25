@@ -288,7 +288,6 @@ dependencies = [
 [[package]]
 name = "embedded-dtls"
 version = "0.1.0"
-source = "git+https://github.com/korken89/embedded-dtls#29668703c20657d601200270864ffc74e80f1253"
 dependencies = [
  "aead",
  "chacha20",
@@ -303,6 +302,7 @@ dependencies = [
  "num_enum",
  "rand_core",
  "sha2",
+ "tokio",
  "typenum",
  "x25519-dalek",
  "zeroize",

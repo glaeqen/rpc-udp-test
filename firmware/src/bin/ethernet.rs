@@ -4,6 +4,7 @@ use embassy_net::{
     udp::{PacketMetadata, UdpSocket},
     Ipv4Address,
 };
+use embedded_dtls::queue_helpers::FramedQueue;
 use heapless::Vec;
 use rpc_definition::endpoints::sleep::Sleep;
 use rtic_sync::channel::{Receiver, Sender};
@@ -41,6 +42,8 @@ pub async fn run_comms(
         &mut tx_buffer,
     );
     socket.bind(8321).unwrap();
+    let mut fq = FramedQueue::<1024>::new();
+    let (s, r) = fq.split().unwrap();
 
     join(
         async {
@@ -81,7 +84,25 @@ pub async fn handle_stack(cx: app::handle_stack::Context<'_>) -> ! {
 }
 
 pub mod edtls {
-    use embedded_dtls::{ApplicationDataReceiver, ApplicationDataSender, Endpoint};
+    use embassy_net::{udp::UdpSocket, Ipv4Address};
+    use embedded_dtls::Endpoint;
 
-    // TODO: Use BBQueue for ADR and ADS
+    pub struct DtlsConnectionHandle<'stack, 'socket> {
+        inner: &'socket UdpSocket<'stack>,
+        endpoint: (Ipv4Address, u16),
+    }
+
+    impl<'stack, 'socket> Endpoint for DtlsConnectionHandle<'stack, 'socket> {
+        type SendError = todo!();
+
+        type ReceiveError;
+
+        async fn send(&self, buf: &[u8]) -> Result<(), Self::SendError> {
+            todo!()
+        }
+
+        async fn recv<'a>(&self, buf: &'a mut [u8]) -> Result<&'a mut [u8], Self::ReceiveError> {
+            todo!()
+        }
+    }
 }
