@@ -42,7 +42,7 @@ postcard = { version = "1.0.8", features = ["defmt"] }
 [dependencies.embedded-dtls]
 path = "/src/embedded-dtls"
 # git = "https://github.com/korken89/embedded-dtls"
-features = ["bb-queue"]
+features = ["bb-queue", "defmt"]
 
 [features]
 other = []

@@ -325,6 +325,7 @@ version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8370630b4dee85ab47d9087813771c5c7fe88d24fdd48649bbdfe6089da4c53a"
 dependencies = [
+ "defmt",
  "defmt-or-log-macros",
 ]
 
@@ -509,6 +510,7 @@ checksum = "b3e0c49ff02ebe324faf3a8653ba91582e2d0a7fdef5bc88f449d5aa1bfcc05c"
 dependencies = [
  "cfg-if",
  "critical-section",
+ "defmt",
  "embedded-io-async",
  "futures-util",
  "heapless 0.8.0",
@@ -565,6 +567,7 @@ dependencies = [
  "bbqueue",
  "chacha20",
  "chacha20poly1305",
+ "defmt",
  "defmt-or-log",
  "digest",
  "embassy-futures",
@@ -596,6 +599,9 @@ name = "embedded-hal"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
+dependencies = [
+ "defmt",
+]
 
 [[package]]
 name = "embedded-hal-async"
@@ -603,6 +609,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c4c685bbef7fe13c3c6dd4da26841ed3980ef33e841cddfa15ce8a8fb3f1884"
 dependencies = [
+ "defmt",
  "embedded-hal 1.0.0",
 ]
 

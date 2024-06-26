@@ -4,7 +4,13 @@ use embassy_net::{
     udp::{PacketMetadata, UdpSocket},
     Ipv4Address,
 };
-use embedded_dtls::queue_helpers::FramedQueue;
+use embedded_dtls::{
+    cipher_suites::{ChaCha20Poly1305Cipher, DtlsEcdhePskWithChacha20Poly1305Sha256},
+    client::{config::ClientConfig, open_client},
+    handshake::extensions::Psk,
+    queue_helpers::FramedQueue,
+    Endpoint,
+};
 use heapless::Vec;
 use rpc_definition::endpoints::sleep::Sleep;
 use rtic_sync::channel::{Receiver, Sender};
@@ -20,6 +26,7 @@ pub async fn run_comms(
     mut sleep_command_sender: Sender<'static, (u32, Sleep), 8>,
 ) -> ! {
     let stack = *cx.shared.network_stack;
+    let rng = cx.local.rng;
 
     // Ensure DHCP configuration is up before trying connect
     stack.wait_config_up().await;
@@ -44,6 +51,25 @@ pub async fn run_comms(
     socket.bind(8321).unwrap();
     let mut fq = FramedQueue::<1024>::new();
     let (s, r) = fq.split().unwrap();
+
+    let c = edtls::DtlsConnectionHandle::new(&socket, BACKEND_ENDPOINT);
+    let client_config = ClientConfig {
+        psk: Psk {
+            identity: b"hello world",
+            key: b"11111234567890qwertyuiopasdfghjklzxc",
+        },
+    };
+
+    let cipher = ChaCha20Poly1305Cipher::default();
+    let client_connection = open_client::<_, _, DtlsEcdhePskWithChacha20Poly1305Sha256>(
+        &mut rng,
+        client_buf,
+        client_socket,
+        cipher,
+        &client_config,
+    )
+    .await
+    .unwrap();
 
     join(
         async {
@@ -84,25 +110,58 @@ pub async fn handle_stack(cx: app::handle_stack::Context<'_>) -> ! {
 }
 
 pub mod edtls {
-    use embassy_net::{udp::UdpSocket, Ipv4Address};
+    use embassy_net::{udp::UdpSocket, IpEndpoint};
     use embedded_dtls::Endpoint;
 
     pub struct DtlsConnectionHandle<'stack, 'socket> {
         inner: &'socket UdpSocket<'stack>,
-        endpoint: (Ipv4Address, u16),
+        endpoint: IpEndpoint,
+    }
+
+    impl<'stack, 'socket> DtlsConnectionHandle<'stack, 'socket> {
+        pub fn new(inner: &'socket UdpSocket<'stack>, endpoint: impl Into<IpEndpoint>) -> Self {
+            let endpoint = endpoint.into();
+            Self { inner, endpoint }
+        }
+    }
+
+    impl<'stack, 'socket> defmt::Format for DtlsConnectionHandle<'stack, 'socket> {
+        fn format(&self, fmt: defmt::Formatter) {
+            defmt::write!(
+                fmt,
+                "DtlsConnectionHandle {{ endpoint: {} }}",
+                self.endpoint
+            )
+        }
+    }
+
+    #[derive(defmt::Format)]
+    pub enum RecvError {
+        UnexpectedSender(IpEndpoint),
+        Inner(embassy_net::udp::RecvError),
+    }
+
+    impl From<embassy_net::udp::RecvError> for RecvError {
+        fn from(value: embassy_net::udp::RecvError) -> Self {
+            Self::Inner(value)
+        }
     }
 
     impl<'stack, 'socket> Endpoint for DtlsConnectionHandle<'stack, 'socket> {
-        type SendError = todo!();
+        type SendError = embassy_net::udp::SendError;
 
-        type ReceiveError;
+        type ReceiveError = RecvError;
 
         async fn send(&self, buf: &[u8]) -> Result<(), Self::SendError> {
-            todo!()
+            self.inner.send_to(buf, self.endpoint).await
         }
 
         async fn recv<'a>(&self, buf: &'a mut [u8]) -> Result<&'a mut [u8], Self::ReceiveError> {
-            todo!()
+            let (n, sender_ep) = self.inner.recv_from(buf).await?;
+            if self.endpoint != sender_ep {
+                return Err(RecvError::UnexpectedSender(sender_ep));
+            }
+            Ok(&mut buf[..n])
         }
     }
 }

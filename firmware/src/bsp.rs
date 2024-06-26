@@ -3,7 +3,7 @@ use core::str::FromStr;
 use embassy_net::{DhcpConfig, Stack, StackResources};
 use embassy_stm32::eth::{Ethernet, PacketQueue};
 use embassy_stm32::peripherals::ETH;
-use embassy_stm32::rng::Rng;
+use embassy_stm32::rng::Rng as EmbassyRng;
 use embassy_stm32::time::Hertz;
 use embassy_stm32::{bind_interrupts, eth, peripherals, rng, Config};
 use heapless::String;
@@ -22,6 +22,7 @@ bind_interrupts!(struct Irqs {
 
 type Device = Ethernet<'static, ETH, KSZ8863SMI>;
 pub type NetworkStack = &'static Stack<Device>;
+pub type Rng = EmbassyRng<'static, embassy_stm32::peripherals::RNG>;
 
 #[inline(never)]
 pub fn ascon_mac(id: &[u8; 12]) -> [u8; 6] {
@@ -36,7 +37,7 @@ pub fn ascon_mac(id: &[u8; 12]) -> [u8; 6] {
 }
 
 #[inline(always)]
-pub fn init(c: cortex_m::Peripherals) -> NetworkStack {
+pub fn init(c: cortex_m::Peripherals) -> (NetworkStack, Rng) {
     // Update this for clock setup.
     let mut config = Config::default();
     {
@@ -104,7 +105,7 @@ pub fn init(c: cortex_m::Peripherals) -> NetworkStack {
     };
 
     // Generate random seed.
-    let mut rng = Rng::new(p.RNG, Irqs);
+    let mut rng = EmbassyRng::new(p.RNG, Irqs);
     let mut seed = [0; 8];
     let _ = rng.fill_bytes(&mut seed);
     let seed = u64::from_le_bytes(seed);
@@ -125,5 +126,5 @@ pub fn init(c: cortex_m::Peripherals) -> NetworkStack {
     Systick::start(c.SYST, 168_000_000, systick_token);
     defmt::info!("init done");
 
-    stack
+    (stack, rng)
 }
