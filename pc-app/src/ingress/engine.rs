@@ -111,16 +111,6 @@ pub(crate) static CONNECTION_SUBSCRIBER: Lazy<broadcast::Sender<Connection>> =
 async fn communication_worker(ip: IpAddr, packet_recv: Receiver<Vec<u8>>) {
     debug!("{ip}: Registered new connection, starting handshake");
 
-    // TODO: This is where we should perform ECDH handshake & authenticity verification of a device.
-    //
-    // let secure_channel = match secure_channel::perform_handshake(ip, packet_recv).await {
-    //     Ok(ch) => ch,
-    //     Err(e) => {
-    //         error!("{ip}: Failed handshake, error = {e:?}");
-    //         return;
-    //     }
-    // };
-
     // TODO: This is where we should perform version checks and firmware update devices before
     // accepting them as active. Most likely they will restart, and this connection will be closed
     // and recreated as soon as the device comes back updated and can pass this check.
@@ -140,6 +130,10 @@ async fn communication_worker(ip: IpAddr, packet_recv: Receiver<Vec<u8>>) {
     // }
 
     debug!("{ip}: Connection active");
+
+    // 0. Wrap the socket and `packet_recv` with `Endpoint` implementor
+    // 1. Do the handshake with open_server
+    // 2. Replace socket and `packet_recv` in `plumbing::` with relevant ApplicationDataReceiver/Sender implementors
 
     let rx = plumbing::UdpDatagramReceiver::new(packet_recv);
 
@@ -165,6 +159,70 @@ async fn communication_worker(ip: IpAddr, packet_recv: Receiver<Vec<u8>>) {
     API_CLIENTS.write().await.remove(&ip);
 
     debug!("{ip}: Connection dropped");
+}
+
+mod edtls {
+    use std::{cell::RefCell, fmt::Debug, net::IpAddr, time::Duration};
+
+    use embedded_dtls::Endpoint;
+    use tokio::{sync::mpsc::Receiver, time::timeout};
+
+    use super::SOCKET;
+
+    pub struct DtlsSocket {
+        endpoint: (IpAddr, u16),
+        rx: RefCell<Receiver<Vec<u8>>>,
+    }
+
+    impl DtlsSocket {
+        pub fn new(rx: Receiver<Vec<u8>>, endpoint: (IpAddr, u16)) -> Self {
+            Self {
+                rx: rx.into(),
+                endpoint,
+            }
+        }
+    }
+    impl Debug for DtlsSocket {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            let (ip, port) = self.endpoint;
+            write!(f, "DtlsSocket {{ endpoint: {ip}:{port} }}")
+        }
+    }
+
+    impl Endpoint for DtlsSocket {
+        type SendError = anyhow::Error;
+
+        type ReceiveError = anyhow::Error;
+
+        async fn send(&self, buf: &[u8]) -> Result<(), Self::SendError> {
+            let socket = SOCKET
+                .get()
+                .ok_or_else(|| anyhow::anyhow!("Socket is not initialized"))?;
+            socket
+                .send_to(buf, self.endpoint)
+                .await
+                .map_err(|e| anyhow::Error::from(e))?;
+            Ok(())
+        }
+
+        async fn recv<'a>(&self, buf: &'a mut [u8]) -> Result<&'a mut [u8], Self::ReceiveError> {
+            match timeout(Duration::from_secs(5), self.rx.borrow_mut().recv()).await {
+                Ok(Some(received_data)) => {
+                    let n = received_data.len();
+                    if buf.len() < n {
+                        return Err(anyhow::anyhow!(
+                            "Could not fit the received datagram into the buffer"
+                        ));
+                    }
+                    let buf = &mut buf[..n];
+                    buf.copy_from_slice(&received_data);
+                    Ok(buf)
+                }
+                Ok(None) => Err(anyhow::anyhow!("All senders were closed")),
+                Err(Elapsed) => Err(anyhow::anyhow!("Connection timed out")),
+            }
+        }
+    }
 }
 
 mod plumbing {

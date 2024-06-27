@@ -68,7 +68,7 @@ pub async fn run_comms(
     join3(
         async move {
             loop {
-                let client_socket = edtls::DtlsConnectionHandle::new(&socket, BACKEND_ENDPOINT);
+                let client_socket = edtls::DtlsSocket::new(&socket, BACKEND_ENDPOINT);
                 let cipher = ChaCha20Poly1305Cipher::default();
                 let client_connection = match with_timeout(
                     Duration::from_secs(5),
@@ -145,23 +145,23 @@ pub mod edtls {
     use embassy_net::{udp::UdpSocket, IpEndpoint};
     use embedded_dtls::Endpoint;
 
-    pub struct DtlsConnectionHandle<'stack, 'socket> {
+    pub struct DtlsSocket<'stack, 'socket> {
         inner: &'socket UdpSocket<'stack>,
         endpoint: IpEndpoint,
     }
 
-    impl<'stack, 'socket> DtlsConnectionHandle<'stack, 'socket> {
+    impl<'stack, 'socket> DtlsSocket<'stack, 'socket> {
         pub fn new(inner: &'socket UdpSocket<'stack>, endpoint: impl Into<IpEndpoint>) -> Self {
             let endpoint = endpoint.into();
             Self { inner, endpoint }
         }
     }
 
-    impl<'stack, 'socket> defmt::Format for DtlsConnectionHandle<'stack, 'socket> {
+    impl<'stack, 'socket> defmt::Format for DtlsSocket<'stack, 'socket> {
         fn format(&self, fmt: defmt::Formatter) {
             defmt::write!(
                 fmt,
-                "DtlsConnectionHandle {{ endpoint: {} }}",
+                "DtlsSocket {{ endpoint: {} }}",
                 self.endpoint
             )
         }
@@ -179,7 +179,7 @@ pub mod edtls {
         }
     }
 
-    impl<'stack, 'socket> Endpoint for DtlsConnectionHandle<'stack, 'socket> {
+    impl<'stack, 'socket> Endpoint for DtlsSocket<'stack, 'socket> {
         type SendError = embassy_net::udp::SendError;
 
         type ReceiveError = RecvError;
