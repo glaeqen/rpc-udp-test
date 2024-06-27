@@ -116,7 +116,7 @@ pub async fn run_comms(
                     .send(ethernet_tx_receiver.recv().await.unwrap())
                     .await
                 {
-                    defmt::error!("Could not fit in the tx_sender: {}", e);
+                    defmt::error!("Could not fit data in the tx_sender: {}", e);
                 }
             }
         },
@@ -129,6 +129,7 @@ pub async fn run_comms(
                     &mut sleep_command_sender,
                 )
                 .await;
+                rx_receiver.pop().unwrap();
             }
         },
     )

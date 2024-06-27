@@ -3,6 +3,13 @@
 //! Note: This app IP as identifier for each device. You should not do that when running UDP
 //! unless you have authentication on the packets, as UDP source addresses are trivial to spoof.
 
+use embedded_dtls::{
+    queue_helpers::framed_queue,
+    server::{
+        config::{Identity, Key, ServerConfig},
+        open_server,
+    },
+};
 use log::*;
 use once_cell::sync::{Lazy, OnceCell};
 use rustc_hash::FxHashMap;
@@ -135,43 +142,65 @@ async fn communication_worker(ip: IpAddr, packet_recv: Receiver<Vec<u8>>) {
     // 1. Do the handshake with open_server
     // 2. Replace socket and `packet_recv` in `plumbing::` with relevant ApplicationDataReceiver/Sender implementors
 
-    let rx = plumbing::UdpDatagramReceiver::new(packet_recv);
+    let psk = [(
+        Identity::from(b"hello world"),
+        Key::from(b"11111234567890qwertyuiopasdfghjklzxc"),
+    )];
 
-    let tx = plumbing::UdpDatagramSender::new(ip);
+    let server_config = ServerConfig { psk: &psk };
 
-    let mut sp = plumbing::Spawner::new();
+    let buf = &mut vec![0; 16 * 1024];
+    let rng = &mut rand::rngs::OsRng;
 
-    // We have one host client per connection.
-    let hostclient = HostClient::<FatalError>::new_with_wire(tx, rx, &mut sp, ERROR_PATH, 10);
+    let server_socket = edtls::DtlsSocket::new(packet_recv, (ip, 8321));
 
-    let _ = CONNECTION_SUBSCRIBER.send(Connection::New(ip));
+    let server_connection = open_server(server_socket, &server_config, rng, buf)
+        .await
+        .unwrap();
 
-    // Store the API client for access by public APIs
-    {
-        API_CLIENTS.write().await.insert(ip, hostclient);
-    }
+    let (mut tx_sender, mut tx_receiver) = framed_queue(10);
+    let (mut rx_sender, mut rx_receiver) = framed_queue(10);
 
-    sp.select_on_all_workers().await;
+    let rx = plumbing::UdpDatagramReceiver::new(rx_receiver);
+    let tx = plumbing::UdpDatagramSender::new(tx_sender);
 
-    let _ = CONNECTION_SUBSCRIBER.send(Connection::Closed(ip));
+    // let mut sp = plumbing::Spawner::new();
 
-    // cleanup of global state
-    API_CLIENTS.write().await.remove(&ip);
+    // // We have one host client per connection.
+    // let hostclient = HostClient::<FatalError>::new_with_wire(tx, rx, &mut sp, ERROR_PATH, 10);
+
+    // let _ = CONNECTION_SUBSCRIBER.send(Connection::New(ip));
+
+    // // Store the API client for access by public APIs
+    // {
+    //     API_CLIENTS.write().await.insert(ip, hostclient);
+    // }
+
+    // sp.select_on_all_workers().await;
+
+    // let _ = CONNECTION_SUBSCRIBER.send(Connection::Closed(ip));
+
+    // // cleanup of global state
+    // API_CLIENTS.write().await.remove(&ip);
 
     debug!("{ip}: Connection dropped");
 }
 
 mod edtls {
-    use std::{cell::RefCell, fmt::Debug, net::IpAddr, time::Duration};
+    use std::{fmt::Debug, net::IpAddr, time::Duration};
 
     use embedded_dtls::Endpoint;
-    use tokio::{sync::mpsc::Receiver, time::timeout};
+    use tokio::{
+        sync::{mpsc::Receiver, Mutex},
+        time::timeout,
+    };
 
     use super::SOCKET;
 
     pub struct DtlsSocket {
         endpoint: (IpAddr, u16),
-        rx: RefCell<Receiver<Vec<u8>>>,
+        // This is a little unfortunate but for now we roll
+        rx: Mutex<Receiver<Vec<u8>>>,
     }
 
     impl DtlsSocket {
@@ -206,7 +235,7 @@ mod edtls {
         }
 
         async fn recv<'a>(&self, buf: &'a mut [u8]) -> Result<&'a mut [u8], Self::ReceiveError> {
-            match timeout(Duration::from_secs(5), self.rx.borrow_mut().recv()).await {
+            match timeout(Duration::from_secs(5), self.rx.lock().await.recv()).await {
                 Ok(Some(received_data)) => {
                     let n = received_data.len();
                     if buf.len() < n {
@@ -229,18 +258,20 @@ mod plumbing {
     use core::future::Future;
     use std::{net::IpAddr, time::Duration};
 
+    use embedded_dtls::{
+        queue_helpers::{Receiver, Sender},
+        ApplicationDataReceiver, ApplicationDataSender,
+    };
     use rpc_definition::postcard_rpc::host_client::{WireRx, WireSpawn, WireTx};
-    use tokio::{sync::mpsc::Receiver, task::JoinSet, time::timeout};
-
-    use super::SOCKET;
+    use tokio::{task::JoinSet, time::timeout};
 
     pub struct UdpDatagramReceiver {
-        receiver: Receiver<Vec<u8>>,
+        rx: Receiver,
     }
 
     impl UdpDatagramReceiver {
-        pub fn new(receiver: Receiver<Vec<u8>>) -> Self {
-            Self { receiver }
+        pub fn new(rx: Receiver) -> Self {
+            Self { rx }
         }
     }
 
@@ -253,27 +284,28 @@ mod plumbing {
 
         fn receive(&mut self) -> impl Future<Output = Result<Vec<u8>, Self::Error>> + Send {
             async {
-                match timeout(Duration::from_secs(5), self.receiver.recv()).await {
-                    Ok(maybe_data) => Ok(maybe_data.ok_or_else(|| {
-                        log::error!("All senders were closed");
-                        anyhow::anyhow!("All senders were closed")
-                    })?),
-                    Err(Elapsed) => {
-                        log::info!("Connection timed out");
-                        Err(anyhow::anyhow!("Connection timed out").into())
-                    }
-                }
+                let data = Vec::from(
+                    self.rx
+                        .peek()
+                        .await
+                        .map_err(|_| anyhow::anyhow!("Channel closed"))?
+                        .as_ref(),
+                );
+                self.rx
+                    .pop()
+                    .map_err(|_| anyhow::anyhow!("Channel closed"))?;
+                Ok(data)
             }
         }
     }
 
     pub struct UdpDatagramSender {
-        ip: IpAddr,
+        tx: Sender,
     }
 
     impl UdpDatagramSender {
-        pub fn new(ip: IpAddr) -> Self {
-            Self { ip }
+        pub fn new(tx: Sender) -> Self {
+            Self { tx }
         }
     }
 
@@ -281,15 +313,11 @@ mod plumbing {
         type Error = Error;
 
         fn send(&mut self, data: Vec<u8>) -> impl Future<Output = Result<(), Self::Error>> + Send {
-            async move {
-                let socket = SOCKET.get().ok_or_else(|| {
-                    log::error!("Socket is not initialized");
-                    anyhow::anyhow!("Socket is not initialized")
-                })?;
-                socket
-                    .send_to(&data, (self.ip, 8321))
+            async {
+                self.tx
+                    .send(data)
                     .await
-                    .map_err(|e| anyhow::Error::from(e))?;
+                    .map_err(|_| anyhow::anyhow!("Channel closed"))?;
                 Ok(())
             }
         }

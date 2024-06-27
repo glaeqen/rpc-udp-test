@@ -39,6 +39,7 @@ pub async fn dispatch(
             ping_response(hdr.seq_no, ethernet_tx).await;
         }
     ) {
+        // Note: Should we send unhandled_error if we failed to deserialize?
         // Dispatch deserialization failure
         defmt::error!("Failed to do dispatch: {}", e);
     }
