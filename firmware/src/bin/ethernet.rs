@@ -1,18 +1,21 @@
 use crate::app;
-use embassy_futures::join::join;
+use embassy_futures::join::join3;
 use embassy_net::{
     udp::{PacketMetadata, UdpSocket},
     Ipv4Address,
 };
 use embedded_dtls::{
     cipher_suites::{ChaCha20Poly1305Cipher, DtlsEcdhePskWithChacha20Poly1305Sha256},
-    client::{config::ClientConfig, open_client},
-    handshake::extensions::Psk,
+    client::{
+        config::{ClientConfig, Psk},
+        open_client,
+    },
     queue_helpers::FramedQueue,
-    Endpoint,
+    ApplicationDataReceiver, ApplicationDataSender,
 };
 use heapless::Vec;
 use rpc_definition::endpoints::sleep::Sleep;
+use rtic_monotonics::systick::Systick;
 use rtic_sync::channel::{Receiver, Sender};
 
 // Backend IP.
@@ -49,10 +52,11 @@ pub async fn run_comms(
         &mut tx_buffer,
     );
     socket.bind(8321).unwrap();
-    let mut fq = FramedQueue::<1024>::new();
-    let (s, r) = fq.split().unwrap();
 
-    let c = edtls::DtlsConnectionHandle::new(&socket, BACKEND_ENDPOINT);
+    let mut fq = FramedQueue::<128>::new();
+    let (mut rx_sender, mut rx_receiver) = fq.split().unwrap();
+    let mut fq = FramedQueue::<128>::new();
+    let (mut tx_sender, mut tx_receiver) = fq.split().unwrap();
     let client_config = ClientConfig {
         psk: Psk {
             identity: b"hello world",
@@ -60,43 +64,63 @@ pub async fn run_comms(
         },
     };
 
-    let cipher = ChaCha20Poly1305Cipher::default();
-    let client_connection = open_client::<_, _, DtlsEcdhePskWithChacha20Poly1305Sha256>(
-        &mut rng,
-        client_buf,
-        client_socket,
-        cipher,
-        &client_config,
-    )
-    .await
-    .unwrap();
-
-    join(
-        async {
-            // Send worker.
+    join3(
+        async move {
             loop {
-                socket
-                    .send_to(
-                        &ethernet_tx_receiver.recv().await.unwrap(),
-                        BACKEND_ENDPOINT,
+                let client_socket = edtls::DtlsConnectionHandle::new(&socket, BACKEND_ENDPOINT);
+                let cipher = ChaCha20Poly1305Cipher::default();
+                let client_connection = match open_client::<
+                    _,
+                    _,
+                    DtlsEcdhePskWithChacha20Poly1305Sha256,
+                >(
+                    rng, &mut buf, client_socket, cipher, &client_config
+                )
+                .await
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        defmt::error!("Failed to open a DTLS client connection: {}", e);
+                        continue;
+                    }
+                };
+
+                let mut rx_buf = [0; 1536];
+                let mut tx_buf = [0; 1536];
+
+                if let Err(e) = client_connection
+                    .run(
+                        &mut rx_buf,
+                        &mut tx_buf,
+                        &mut rx_sender,
+                        &mut tx_receiver,
+                        &mut Systick,
                     )
                     .await
-                    .unwrap();
+                {
+                    defmt::panic!("Client connection closed with {:?}", e);
+                }
+            }
+        },
+        async {
+            loop {
+                if let Err(e) = tx_sender
+                    .send(ethernet_tx_receiver.recv().await.unwrap())
+                    .await
+                {
+                    defmt::error!("Could not fit in the tx_sender: {}", e);
+                }
             }
         },
         async {
             // Receive worker.
             loop {
-                if let Ok((n, _ep)) = socket.recv_from(&mut buf).await {
-                    crate::command_handling::dispatch(
-                        &buf[..n],
-                        &mut ethernet_tx_sender,
-                        &mut sleep_command_sender,
-                    )
-                    .await;
-                } else {
-                    defmt::error!("UDP: incoming packet truncated");
-                }
+                crate::command_handling::dispatch(
+                    rx_receiver.peek().await.unwrap().as_ref(),
+                    &mut ethernet_tx_sender,
+                    &mut sleep_command_sender,
+                )
+                .await;
             }
         },
     )
