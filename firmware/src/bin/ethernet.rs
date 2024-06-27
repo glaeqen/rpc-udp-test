@@ -160,11 +160,7 @@ pub mod edtls {
 
     impl<'stack, 'socket> defmt::Format for DtlsSocket<'stack, 'socket> {
         fn format(&self, fmt: defmt::Formatter) {
-            defmt::write!(
-                fmt,
-                "DtlsSocket {{ endpoint: {} }}",
-                self.endpoint
-            )
+            defmt::write!(fmt, "DtlsSocket {{ endpoint: {} }}", self.endpoint)
         }
     }
 
@@ -190,6 +186,8 @@ pub mod edtls {
         }
 
         async fn recv<'a>(&self, buf: &'a mut [u8]) -> Result<&'a mut [u8], Self::ReceiveError> {
+            // Problem: If "backend" restarts, client continues with the old keypair and thus just bounces off.
+            // I guess only a heartbeat is a solution and a timeout on a receiving side to restart the connection altogether?
             let (n, sender_ep) = self.inner.recv_from(buf).await?;
             if self.endpoint != sender_ep {
                 return Err(RecvError::UnexpectedSender(sender_ep));
