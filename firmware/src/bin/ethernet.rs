@@ -4,6 +4,7 @@ use embassy_net::{
     udp::{PacketMetadata, UdpSocket},
     Ipv4Address,
 };
+use embassy_time::{with_timeout, Duration, TimeoutError};
 use embedded_dtls::{
     cipher_suites::{ChaCha20Poly1305Cipher, DtlsEcdhePskWithChacha20Poly1305Sha256},
     client::{
@@ -69,18 +70,25 @@ pub async fn run_comms(
             loop {
                 let client_socket = edtls::DtlsConnectionHandle::new(&socket, BACKEND_ENDPOINT);
                 let cipher = ChaCha20Poly1305Cipher::default();
-                let client_connection = match open_client::<
-                    _,
-                    _,
-                    DtlsEcdhePskWithChacha20Poly1305Sha256,
-                >(
-                    rng, &mut buf, client_socket, cipher, &client_config
+                let client_connection = match with_timeout(
+                    Duration::from_secs(5),
+                    open_client::<_, _, DtlsEcdhePskWithChacha20Poly1305Sha256>(
+                        rng,
+                        &mut buf,
+                        client_socket,
+                        cipher,
+                        &client_config,
+                    ),
                 )
                 .await
                 {
-                    Ok(c) => c,
-                    Err(e) => {
+                    Ok(Ok(c)) => c,
+                    Ok(Err(e)) => {
                         defmt::error!("Failed to open a DTLS client connection: {}", e);
+                        continue;
+                    }
+                    Err(TimeoutError) => {
+                        defmt::error!("Attempt to open a DTLS connection timed out");
                         continue;
                     }
                 };
@@ -98,7 +106,7 @@ pub async fn run_comms(
                     )
                     .await
                 {
-                    defmt::panic!("Client connection closed with {:?}", e);
+                    defmt::error!("Client connection closed with {:?}", e);
                 }
             }
         },

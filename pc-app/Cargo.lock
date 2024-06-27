@@ -242,6 +242,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8370630b4dee85ab47d9087813771c5c7fe88d24fdd48649bbdfe6089da4c53a"
 dependencies = [
  "defmt-or-log-macros",
+ "log",
 ]
 
 [[package]]
@@ -283,6 +284,7 @@ dependencies = [
  "embedded-io-async",
  "futures-util",
  "heapless 0.8.0",
+ "log",
 ]
 
 [[package]]
@@ -299,6 +301,7 @@ dependencies = [
  "embedded-hal-async",
  "heapless 0.8.0",
  "hkdf",
+ "log",
  "num_enum",
  "rand_core",
  "sha2",
