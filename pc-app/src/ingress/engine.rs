@@ -28,6 +28,8 @@ use rpc_definition::{
     wire_error::{FatalError, ERROR_PATH},
 };
 
+use crate::ingress::engine::edtls::Delay;
+
 /// The new state of a connection.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Connection {
@@ -158,30 +160,37 @@ async fn communication_worker(ip: IpAddr, packet_recv: Receiver<Vec<u8>>) {
         .await
         .unwrap();
 
-    let (mut tx_sender, mut tx_receiver) = framed_queue(10);
-    let (mut rx_sender, mut rx_receiver) = framed_queue(10);
+    let (tx_sender, mut tx_receiver) = framed_queue(10);
+    let (mut rx_sender, rx_receiver) = framed_queue(10);
 
     let rx = plumbing::UdpDatagramReceiver::new(rx_receiver);
     let tx = plumbing::UdpDatagramSender::new(tx_sender);
 
-    // let mut sp = plumbing::Spawner::new();
+    let mut sp = plumbing::Spawner::new();
 
-    // // We have one host client per connection.
-    // let hostclient = HostClient::<FatalError>::new_with_wire(tx, rx, &mut sp, ERROR_PATH, 10);
+    // We have one host client per connection.
+    let hostclient = HostClient::<FatalError>::new_with_wire(tx, rx, &mut sp, ERROR_PATH, 10);
 
-    // let _ = CONNECTION_SUBSCRIBER.send(Connection::New(ip));
+    let _ = CONNECTION_SUBSCRIBER.send(Connection::New(ip));
 
-    // // Store the API client for access by public APIs
-    // {
-    //     API_CLIENTS.write().await.insert(ip, hostclient);
-    // }
+    // Store the API client for access by public APIs
+    {
+        API_CLIENTS.write().await.insert(ip, hostclient);
+    }
 
-    // sp.select_on_all_workers().await;
+    let mut rx_buf = vec![0; 1536];
+    let mut tx_buf = vec![0; 1536];
 
-    // let _ = CONNECTION_SUBSCRIBER.send(Connection::Closed(ip));
+    let mut delay = Delay;
+    tokio::select! {
+        _ = server_connection.run(&mut rx_buf, &mut tx_buf, &mut rx_sender, &mut tx_receiver, &mut delay) => {},
+        _ = sp.select_on_all_workers() => {}
+    }
 
-    // // cleanup of global state
-    // API_CLIENTS.write().await.remove(&ip);
+    // cleanup of global state
+    API_CLIENTS.write().await.remove(&ip);
+
+    let _ = CONNECTION_SUBSCRIBER.send(Connection::Closed(ip));
 
     debug!("{ip}: Connection dropped");
 }
@@ -189,11 +198,19 @@ async fn communication_worker(ip: IpAddr, packet_recv: Receiver<Vec<u8>>) {
 mod edtls {
     use std::{fmt::Debug, net::IpAddr, time::Duration};
 
-    use embedded_dtls::Endpoint;
+    use embedded_dtls::{DelayNs, Endpoint};
     use tokio::{
         sync::{mpsc::Receiver, Mutex},
-        time::timeout,
+        time::{error::Elapsed, timeout},
     };
+
+    pub struct Delay;
+
+    impl DelayNs for Delay {
+        async fn delay_ns(&mut self, ns: u32) {
+            tokio::time::sleep(Duration::from_nanos(ns as _)).await;
+        }
+    }
 
     use super::SOCKET;
 
@@ -248,7 +265,7 @@ mod edtls {
                     Ok(buf)
                 }
                 Ok(None) => Err(anyhow::anyhow!("All senders were closed")),
-                Err(Elapsed) => Err(anyhow::anyhow!("Connection timed out")),
+                Err(Elapsed { .. }) => Err(anyhow::anyhow!("Connection timed out")),
             }
         }
     }
@@ -256,14 +273,13 @@ mod edtls {
 
 mod plumbing {
     use core::future::Future;
-    use std::{net::IpAddr, time::Duration};
 
     use embedded_dtls::{
         queue_helpers::{Receiver, Sender},
         ApplicationDataReceiver, ApplicationDataSender,
     };
     use rpc_definition::postcard_rpc::host_client::{WireRx, WireSpawn, WireTx};
-    use tokio::{task::JoinSet, time::timeout};
+    use tokio::task::JoinSet;
 
     pub struct UdpDatagramReceiver {
         rx: Receiver,
