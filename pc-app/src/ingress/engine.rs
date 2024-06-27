@@ -187,6 +187,7 @@ async fn communication_worker(ip: IpAddr, packet_recv: Receiver<Vec<u8>>) {
         _ = sp.select_on_all_workers() => {}
     }
 
+    // How to guarantee that we do a nice cleanup? What if code in the select panics?
     // cleanup of global state
     API_CLIENTS.write().await.remove(&ip);
 
