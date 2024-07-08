@@ -28,7 +28,7 @@ use rpc_definition::{
     wire_error::{FatalError, ERROR_PATH},
 };
 
-use crate::ingress::engine::edtls::Delay;
+use crate::ingress::{engine::edtls::Delay, postcard_rpc_ext::HostClientExt};
 
 /// The new state of a connection.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -138,7 +138,6 @@ async fn communication_worker(ip: IpAddr, packet_recv: Receiver<Vec<u8>>) {
     //     }
     // }
 
-    debug!("{ip}: Connection active");
 
     // 0. Wrap the socket and `packet_recv` with `Endpoint` implementor
     // 1. Do the handshake with open_server
@@ -159,16 +158,11 @@ async fn communication_worker(ip: IpAddr, packet_recv: Receiver<Vec<u8>>) {
 
     let server_connection = open_server(rx, tx, &server_config, rng, buf).await.unwrap();
 
-    let (tx_sender, mut tx_receiver) = framed_queue(10);
-    let (mut rx_sender, rx_receiver) = framed_queue(10);
-
-    let rx = plumbing::UdpDatagramReceiver::new(rx_receiver);
-    let tx = plumbing::UdpDatagramSender::new(tx_sender);
-
-    let mut sp = plumbing::Spawner::new();
+    let (mut tx_sender, mut tx_receiver) = framed_queue(10);
+    let (mut rx_sender, mut rx_receiver) = framed_queue(10);
 
     // We have one host client per connection.
-    let hostclient = HostClient::<FatalError>::new_with_wire(tx, rx, &mut sp, ERROR_PATH, 10);
+    let (hostclient, rpc_worker) = HostClient::new_edtls(ERROR_PATH, 10);
 
     let _ = CONNECTION_SUBSCRIBER.send(Connection::New(ip));
 
@@ -182,8 +176,14 @@ async fn communication_worker(ip: IpAddr, packet_recv: Receiver<Vec<u8>>) {
 
     let mut delay = Delay;
     tokio::select! {
-        _ = server_connection.run(&mut rx_buf, &mut tx_buf, &mut rx_sender, &mut tx_receiver, &mut delay) => {},
-        _ = sp.select_all_workers() => {}
+        e = server_connection.run(&mut rx_buf, &mut tx_buf, &mut rx_sender, &mut tx_receiver, &mut delay) => {
+            let e = e.unwrap_err();
+            error!("{ip}: Edtls connection stopped: {e:?}");
+        },
+        e = rpc_worker.run(ip, &mut rx_receiver, &mut tx_sender) => {
+            let e = e.unwrap_err();
+            error!("{ip}: Rpc worker stopped: {e:?}");
+        }
     }
 
     // How to guarantee that we do a nice cleanup? What if code in the select panics?
@@ -285,104 +285,6 @@ mod edtls {
                 .await
                 .map_err(|e| anyhow::Error::from(e))?;
             Ok(())
-        }
-    }
-}
-
-mod plumbing {
-    use core::future::Future;
-
-    use embedded_dtls::{
-        queue_helpers::{Receiver, Sender},
-        ApplicationDataReceiver, ApplicationDataSender,
-    };
-    use rpc_definition::postcard_rpc::host_client::{WireRx, WireSpawn, WireTx};
-    use tokio::task::JoinSet;
-
-    pub struct UdpDatagramReceiver {
-        rx: Receiver,
-    }
-
-    impl UdpDatagramReceiver {
-        pub fn new(rx: Receiver) -> Self {
-            Self { rx }
-        }
-    }
-
-    #[derive(thiserror::Error, Debug)]
-    #[error(transparent)]
-    pub struct Error(#[from] anyhow::Error);
-
-    impl WireRx for UdpDatagramReceiver {
-        type Error = Error;
-
-        fn receive(&mut self) -> impl Future<Output = Result<Vec<u8>, Self::Error>> + Send {
-            async {
-                let data = Vec::from(
-                    self.rx
-                        .peek()
-                        .await
-                        .map_err(|_| anyhow::anyhow!("Channel closed"))?
-                        .as_ref(),
-                );
-                self.rx
-                    .pop()
-                    .map_err(|_| anyhow::anyhow!("Channel closed"))?;
-                Ok(data)
-            }
-        }
-    }
-
-    pub struct UdpDatagramSender {
-        tx: Sender,
-    }
-
-    impl UdpDatagramSender {
-        pub fn new(tx: Sender) -> Self {
-            Self { tx }
-        }
-    }
-
-    impl WireTx for UdpDatagramSender {
-        type Error = Error;
-
-        fn send(&mut self, data: Vec<u8>) -> impl Future<Output = Result<(), Self::Error>> + Send {
-            async {
-                self.tx
-                    .send(data)
-                    .await
-                    .map_err(|_| anyhow::anyhow!("Channel closed"))?;
-                Ok(())
-            }
-        }
-    }
-
-    /// [`WireSpawn`] implementation based on [`tokio::task::join_set::JoinSet`]
-    ///
-    /// User can call and await [`Self::select_all_workers`]
-    pub struct Spawner {
-        handles: JoinSet<()>,
-    }
-
-    impl Spawner {
-        /// Constructs a spawner
-        pub fn new() -> Self {
-            Self {
-                handles: JoinSet::new(),
-            }
-        }
-
-        // This method awaits until the first worker terminates and then it shuts down
-        // all remaining ones.
-        pub async fn select_all_workers(mut self) {
-            self.handles.join_next().await;
-            self.handles.shutdown().await;
-        }
-    }
-
-    impl WireSpawn for Spawner {
-        fn spawn(&mut self, fut: impl Future<Output = ()> + Send + 'static) {
-            let _ = self.handles.spawn(fut);
         }
     }
 }
