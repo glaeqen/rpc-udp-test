@@ -6,9 +6,9 @@ edition = "2021"
 [dependencies]
 postcard = { version = "1.0.8", features = ["experimental-derive"] }
 serde = { version = "1.0.192", features = ["derive"], default-features = false }
-postcard-rpc = { path = "/src/postcard-rpc/source/postcard-rpc" }
+postcard-rpc = { version = "0.5.1" }
 defmt = { version = "0.3", optional = true }
 
 [features]
 backend = ["postcard-rpc/use-std"]
-defmt-03 = ["dep:defmt", "postcard-rpc/use-defmt"]
+defmt-03 = ["dep:defmt"]

@@ -21,10 +21,10 @@ pub async fn dispatch(
     sleep_command_sender: &mut Sender<'static, (u32, Sleep), 8>,
 ) {
     // Do handling of each command, some synchronously and some asynchronously.
-    if let Err(e) = postcard_rpc::dispatch!(
+    if let Err(e) = crate::dispatch!(
         buf,
         (hdr, _buf) = _ => {
-            defmt::error!("Got unhandled endpoint/topic with key = {:x}", hdr.key);
+            defmt::error!("Got unhandled endpoint/topic with key = {:x}", hdr.key.to_bytes());
             unhandled_error(hdr.seq_no, ethernet_tx, FatalError::UnknownEndpoint).await;
         },
         EP: (hdr, sleeping_req) = SleepEndpoint => {
@@ -176,4 +176,130 @@ impl core::cmp::Ord for SortedSleepHandler {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.sleep_until.cmp(&other.sleep_until)
     }
+}
+
+#[derive(defmt::Format, Debug, PartialEq, Eq, Clone)]
+/// Possible errors in dispatch handling.
+pub enum DispatchError {
+    /// The deserialization of the header failed.
+    Header(postcard::Error),
+    /// The  deserialization of the body failed.
+    Body(postcard::Error),
+}
+
+/// ## Dispatch macro
+///
+/// Minimalist `tokio::select`-style helper for dispatching actions
+/// given a `buf` with a deserializable packet.
+///
+/// Each macro branch is a handler for a specific endpoint or a topic.
+///
+/// - `EP`-prefixed branch is meant for handling endpoints
+/// - `TP`-prefixed branch is meant for handling topics
+/// - Branch without a prefix is meant for handling deserializable packets
+/// that do not match any of the existing handlers.
+///
+/// Macro includes a compile-time check for duplicate endpoints/topics.
+///
+/// ```rust
+/// # use postcard::experimental::schema::Schema;
+/// # use postcard_rpc::endpoint;
+/// # macro_rules! error {($($__:tt)+) => {}}
+/// # macro_rules! trace {($($__:tt)+) => {}}
+/// # endpoint!(PingPongEndpoint, Ping, Pong, "endpoint/pingpong");
+/// # #[derive(serde::Deserialize, Schema)]
+/// # pub struct Ping {}
+/// # #[derive(Schema)]
+/// # pub struct Pong {}
+/// # pub enum Error { UnknownEndpoint };
+/// # async fn send_error(__: Error) {}
+/// # async fn send_pong() {}
+/// # async {
+/// # let buf = &[0_u8; 1];
+/// if let Err(e) = postcard_rpc::dispatch!(
+///     buf,
+///     (hdr, _buf) = _ => {
+///         error!("Got unhandled endpoint/topic with key = {:x}", hdr.key);
+///         send_error(Error::UnknownEndpoint).await;
+///     },
+///     EP: (hdr, _pingpong_req) = PingPongEndpoint => {
+///         trace!("Got Ping request");
+///         send_pong().await;
+///     }
+/// ) {
+///     error!("Failed to do dispatch: {}", e);
+/// }
+/// # };
+/// ```
+#[macro_export]
+macro_rules! dispatch {
+    (
+        $buf:ident,
+        $unhandled:pat = _ => $unhandled_body:tt,
+        $(EP: $ep_request:pat = $endpoint:path => $ep_body:tt),*
+        $(TP: $topic_pl:pat = $topic:path => $topic_body:tt),*
+    ) => {
+    {
+        const _UNIQ: () = {
+            let keys = [$(<$endpoint as postcard_rpc::Endpoint>::REQ_KEY),* $(<$topic as postcard_rpc::Topic>::TOPIC_KEY),*];
+
+            let mut i = 0;
+
+            while i < keys.len() {
+                let mut j = i + 1;
+                while j < keys.len() {
+                    if keys[i].const_cmp(&keys[j]) {
+                        panic!("Keys are not unique, there is a collision!");
+                    }
+                    j += 1;
+                }
+
+                i += 1;
+            }
+        };
+
+        let _ = _UNIQ;
+
+        match postcard_rpc::headered::extract_header_from_bytes($buf) {
+            Ok((hdr, body)) => {
+                match hdr.key {
+                $(
+                    <$endpoint as postcard_rpc::Endpoint>::REQ_KEY => {
+                        match postcard::take_from_bytes::<<$endpoint as postcard_rpc::Endpoint>::Request>(body) {
+                            Ok((req, _rest)) => {
+                                let $ep_request = (&hdr, req);
+                                $ep_body
+
+                                Ok(())
+                            }
+                            Err(e) => Err(DispatchError::Body(e))
+                        }
+                    }
+                )*
+                $(
+                    <$topic as postcard_rpc::Topic>::TOPIC_KEY => {
+                        match postcard::take_from_bytes::<<$topic as postcard_rpc::Topic>::Message>(body) {
+                            Ok((msg, _rest)) => {
+                                let $topic_pl = (&hdr, msg);
+                                $topic_body
+
+                                Ok(())
+                            }
+                            Err(e) => Err(DispatchError::Body(e))
+                        }
+                    }
+                )*
+                    _ => {
+                        let $unhandled = (&hdr, body);
+
+                        $unhandled_body
+
+                        Ok(())
+                    }
+                }
+            }
+            Err(e) => Err(DispatchError::Header(e)),
+        }
+    }
+};
 }

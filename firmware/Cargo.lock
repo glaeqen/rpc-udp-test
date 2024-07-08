@@ -1054,8 +1054,9 @@ dependencies = [
 [[package]]
 name = "postcard-rpc"
 version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1167cee96c62b21cca3209c449c254480805ba23a830c4e634c30fcc6bf451af"
 dependencies = [
- "defmt",
  "heapless 0.8.0",
  "postcard",
  "serde",
