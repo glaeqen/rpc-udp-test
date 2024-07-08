@@ -8,8 +8,6 @@ use rpc_definition::{postcard_rpc::host_client::HostClient, wire_error::FatalErr
 use std::net::IpAddr;
 use tokio::net::UdpSocket;
 
-mod postcard_rpc_ext;
-
 // Private internals that run the communication.
 mod engine;
 
