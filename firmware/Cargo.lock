@@ -1054,7 +1054,6 @@ dependencies = [
 [[package]]
 name = "postcard-rpc"
 version = "0.5.1"
-source = "git+https://github.com/glaeqen/postcard-rpc?branch=dev#965b3473f753da45a449889d982bf3084fcc5528"
 dependencies = [
  "defmt",
  "heapless 0.8.0",

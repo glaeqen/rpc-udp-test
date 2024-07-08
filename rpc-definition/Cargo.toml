@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 postcard = { version = "1.0.8", features = ["experimental-derive"] }
 serde = { version = "1.0.192", features = ["derive"], default-features = false }
-postcard-rpc = { version = "0.5.1", git = "https://github.com/glaeqen/postcard-rpc", branch = "dev" }
+postcard-rpc = { path = "/src/postcard-rpc/source/postcard-rpc" }
 defmt = { version = "0.3", optional = true }
 
 [features]

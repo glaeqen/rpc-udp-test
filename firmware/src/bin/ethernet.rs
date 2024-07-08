@@ -68,14 +68,16 @@ pub async fn run_comms(
     join3(
         async move {
             loop {
-                let client_socket = edtls::DtlsSocket::new(&socket, BACKEND_ENDPOINT);
+                let rx = edtls::DtlsSocket::new(&socket, BACKEND_ENDPOINT);
+                let tx = edtls::DtlsSocket::new(&socket, BACKEND_ENDPOINT);
                 let cipher = ChaCha20Poly1305Cipher::default();
                 let client_connection = match with_timeout(
                     Duration::from_secs(5),
-                    open_client::<_, _, DtlsEcdhePskWithChacha20Poly1305Sha256>(
+                    open_client::<_, _, _, DtlsEcdhePskWithChacha20Poly1305Sha256>(
                         rng,
                         &mut buf,
-                        client_socket,
+                        rx,
+                        tx,
                         cipher,
                         &client_config,
                     ),
@@ -144,7 +146,6 @@ pub async fn handle_stack(cx: app::handle_stack::Context<'_>) -> ! {
 
 pub mod edtls {
     use embassy_net::{udp::UdpSocket, IpEndpoint};
-    use embedded_dtls::Endpoint;
 
     pub struct DtlsSocket<'stack, 'socket> {
         inner: &'socket UdpSocket<'stack>,
@@ -176,16 +177,13 @@ pub mod edtls {
         }
     }
 
-    impl<'stack, 'socket> Endpoint for DtlsSocket<'stack, 'socket> {
-        type SendError = embassy_net::udp::SendError;
-
+    impl<'stack, 'socket> embedded_dtls::RxEndpoint for DtlsSocket<'stack, 'socket> {
         type ReceiveError = RecvError;
 
-        async fn send(&self, buf: &[u8]) -> Result<(), Self::SendError> {
-            self.inner.send_to(buf, self.endpoint).await
-        }
-
-        async fn recv<'a>(&self, buf: &'a mut [u8]) -> Result<&'a mut [u8], Self::ReceiveError> {
+        async fn recv<'a>(
+            &mut self,
+            buf: &'a mut [u8],
+        ) -> Result<&'a mut [u8], Self::ReceiveError> {
             // Problem: If "backend" restarts, client continues with the old keypair and thus just bounces off.
             // I guess only a heartbeat is a solution and a timeout on a receiving side to restart the connection altogether?
             let (n, sender_ep) = self.inner.recv_from(buf).await?;
@@ -193,6 +191,14 @@ pub mod edtls {
                 return Err(RecvError::UnexpectedSender(sender_ep));
             }
             Ok(&mut buf[..n])
+        }
+    }
+
+    impl<'stack, 'socket> embedded_dtls::TxEndpoint for DtlsSocket<'stack, 'socket> {
+        type SendError = embassy_net::udp::SendError;
+
+        async fn send(&mut self, buf: &[u8]) -> Result<(), Self::SendError> {
+            self.inner.send_to(buf, self.endpoint).await
         }
     }
 }

@@ -154,11 +154,10 @@ async fn communication_worker(ip: IpAddr, packet_recv: Receiver<Vec<u8>>) {
     let buf = &mut vec![0; 16 * 1024];
     let rng = &mut rand::rngs::OsRng;
 
-    let server_socket = edtls::DtlsSocket::new(packet_recv, (ip, 8321));
+    let rx = edtls::RxEndpoint::new((ip, 8321), packet_recv);
+    let tx = edtls::TxEndpoint::new((ip, 8321));
 
-    let server_connection = open_server(server_socket, &server_config, rng, buf)
-        .await
-        .unwrap();
+    let server_connection = open_server(rx, tx, &server_config, rng, buf).await.unwrap();
 
     let (tx_sender, mut tx_receiver) = framed_queue(10);
     let (mut rx_sender, rx_receiver) = framed_queue(10);
@@ -184,7 +183,7 @@ async fn communication_worker(ip: IpAddr, packet_recv: Receiver<Vec<u8>>) {
     let mut delay = Delay;
     tokio::select! {
         _ = server_connection.run(&mut rx_buf, &mut tx_buf, &mut rx_sender, &mut tx_receiver, &mut delay) => {},
-        _ = sp.select_on_all_workers() => {}
+        _ = sp.select_all_workers() => {}
     }
 
     // How to guarantee that we do a nice cleanup? What if code in the select panics?
@@ -199,9 +198,9 @@ async fn communication_worker(ip: IpAddr, packet_recv: Receiver<Vec<u8>>) {
 mod edtls {
     use std::{fmt::Debug, net::IpAddr, time::Duration};
 
-    use embedded_dtls::{DelayNs, Endpoint};
+    use embedded_dtls::{self, DelayNs};
     use tokio::{
-        sync::{mpsc::Receiver, Mutex},
+        sync::mpsc::Receiver,
         time::{error::Elapsed, timeout},
     };
 
@@ -215,45 +214,49 @@ mod edtls {
 
     use super::SOCKET;
 
-    pub struct DtlsSocket {
+    pub struct TxEndpoint {
         endpoint: (IpAddr, u16),
-        // This is a little unfortunate but for now we roll
-        rx: Mutex<Receiver<Vec<u8>>>,
     }
 
-    impl DtlsSocket {
-        pub fn new(rx: Receiver<Vec<u8>>, endpoint: (IpAddr, u16)) -> Self {
-            Self {
-                rx: rx.into(),
-                endpoint,
-            }
+    impl TxEndpoint {
+        pub fn new(endpoint: (IpAddr, u16)) -> Self {
+            Self { endpoint }
         }
     }
-    impl Debug for DtlsSocket {
+
+    pub struct RxEndpoint {
+        endpoint: (IpAddr, u16),
+        rx: Receiver<Vec<u8>>,
+    }
+
+    impl RxEndpoint {
+        pub fn new(endpoint: (IpAddr, u16), rx: Receiver<Vec<u8>>) -> Self {
+            Self { endpoint, rx }
+        }
+    }
+
+    impl Debug for TxEndpoint {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             let (ip, port) = self.endpoint;
             write!(f, "DtlsSocket {{ endpoint: {ip}:{port} }}")
         }
     }
 
-    impl Endpoint for DtlsSocket {
-        type SendError = anyhow::Error;
+    impl Debug for RxEndpoint {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            let (ip, port) = self.endpoint;
+            write!(f, "DtlsSocket {{ endpoint: {ip}:{port} }}")
+        }
+    }
 
+    impl embedded_dtls::RxEndpoint for RxEndpoint {
         type ReceiveError = anyhow::Error;
 
-        async fn send(&self, buf: &[u8]) -> Result<(), Self::SendError> {
-            let socket = SOCKET
-                .get()
-                .ok_or_else(|| anyhow::anyhow!("Socket is not initialized"))?;
-            socket
-                .send_to(buf, self.endpoint)
-                .await
-                .map_err(|e| anyhow::Error::from(e))?;
-            Ok(())
-        }
-
-        async fn recv<'a>(&self, buf: &'a mut [u8]) -> Result<&'a mut [u8], Self::ReceiveError> {
-            match timeout(Duration::from_secs(5), self.rx.lock().await.recv()).await {
+        async fn recv<'a>(
+            &mut self,
+            buf: &'a mut [u8],
+        ) -> Result<&'a mut [u8], Self::ReceiveError> {
+            match timeout(Duration::from_secs(5), self.rx.recv()).await {
                 Ok(Some(received_data)) => {
                     let n = received_data.len();
                     if buf.len() < n {
@@ -268,6 +271,20 @@ mod edtls {
                 Ok(None) => Err(anyhow::anyhow!("All senders were closed")),
                 Err(Elapsed { .. }) => Err(anyhow::anyhow!("Connection timed out")),
             }
+        }
+    }
+    impl embedded_dtls::TxEndpoint for TxEndpoint {
+        type SendError = anyhow::Error;
+
+        async fn send(&mut self, buf: &[u8]) -> Result<(), Self::SendError> {
+            let socket = SOCKET
+                .get()
+                .ok_or_else(|| anyhow::anyhow!("Socket is not initialized"))?;
+            socket
+                .send_to(buf, self.endpoint)
+                .await
+                .map_err(|e| anyhow::Error::from(e))?;
+            Ok(())
         }
     }
 }
@@ -340,17 +357,24 @@ mod plumbing {
         }
     }
 
+    /// [`WireSpawn`] implementation based on [`tokio::task::join_set::JoinSet`]
+    ///
+    /// User can call and await [`Self::select_all_workers`]
     pub struct Spawner {
         handles: JoinSet<()>,
     }
 
     impl Spawner {
+        /// Constructs a spawner
         pub fn new() -> Self {
             Self {
                 handles: JoinSet::new(),
             }
         }
-        pub async fn select_on_all_workers(mut self) {
+
+        // This method awaits until the first worker terminates and then it shuts down
+        // all remaining ones.
+        pub async fn select_all_workers(mut self) {
             self.handles.join_next().await;
             self.handles.shutdown().await;
         }
